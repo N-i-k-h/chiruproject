@@ -25,12 +25,30 @@ RECIPIENTS = ['Chiruchiranth001@gmail.com']
 # Load Model once
 model = YOLO("yolov8s.pt")
 
+import requests
+
 # ==============================
 # Helper Functions
 # ==============================
-def send_email_alert(image_path):
+def get_ip_location():
+    try:
+        response = requests.get("http://ip-api.com/json/", timeout=5)
+        data = response.json()
+        if data['status'] == 'success':
+            return f"{data['city']}, {data['country']} ({data['lat']},{data['lon']})"
+        return "Unknown Location"
+    except:
+        return "Unknown Location"
+
+def send_email_alert(image_path, location_str):
     subject = "🚨 Accident Detected (Live Camera)"
-    body = "An accident was detected in the live camera feed."
+    body = f"""
+    An accident was detected in the live camera feed.
+    
+    📍 Reported Location: {location_str}
+    
+    Google Maps: https://www.google.com/maps?q={location_str.split('(')[-1].replace(')', '') if '(' in location_str else location_str}
+    """
 
     msg = MIMEMultipart()
     msg['From'] = EMAIL_ADDRESS
@@ -67,6 +85,7 @@ class AccidentDetectionProcessor(VideoTransformerBase):
         self.collision_start = {}
         self.accident_active = False
         self.last_email_time = 0
+        self.location_context = "Unknown" # Set externally
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -120,17 +139,18 @@ class AccidentDetectionProcessor(VideoTransformerBase):
             cv2.putText(img, "ACCIDENT DETECTED!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
             cv2.rectangle(img, (0, 0), (img.shape[1], img.shape[0]), (0, 0, 255), 10)
             
-            # Send Email (Throttled to once every 10 seconds)
+            # Send Email (Throttled)
             if time.time() - self.last_email_time > 10:
                 self.last_email_time = time.time()
                 
-                # Save snapshot
+                # Snapshot
                 if not os.path.exists("snapshots"):
                      os.makedirs("snapshots")
                 snap_path = f"snapshots/live_{datetime.datetime.now().strftime('%H%M%S')}.jpg"
                 cv2.imwrite(snap_path, img)
                 
-                threading.Thread(target=send_email_alert, args=(snap_path,), daemon=True).start()
+                # Use the location context passed during init
+                threading.Thread(target=send_email_alert, args=(snap_path, self.location_context), daemon=True).start()
                 
         elif not overlap_found:
              self.accident_active = False
@@ -145,11 +165,31 @@ def main():
     st.title("🚨 Live Accident Detection")
     st.markdown("Allow camera access to start.")
 
+    # Location Setup
+    if 'location' not in st.session_state:
+        st.session_state['location'] = get_ip_location()
+
+    with st.sidebar:
+        st.header("📍 System Settings")
+        st.write(f"Detected IP Location: **{st.session_state['location']}**")
+        
+        # Allow Manual Override
+        manual_loc = st.text_input("Override Location (Optional)", value=st.session_state['location'])
+        if manual_loc:
+            st.session_state['location'] = manual_loc
+
+    # Video Processor Factory
+    # We use a factory to pass the current session location to the processor
+    def processor_factory():
+        proc = AccidentDetectionProcessor()
+        proc.location_context = st.session_state['location']
+        return proc
+
     # Live Camera Stream
     webrtc_streamer(
         key="accident-detection",
         mode=WebRtcMode.SENDRECV,
-        video_processor_factory=AccidentDetectionProcessor,
+        video_processor_factory=processor_factory,
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True,
     )
