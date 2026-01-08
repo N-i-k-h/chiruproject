@@ -1,4 +1,3 @@
-opencv-python
+streamlit
 ultralytics
-pyserial
-requests
+opencv-python-headless
